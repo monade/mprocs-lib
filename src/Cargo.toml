@@ -1,8 +1,8 @@
 [package]
 name = "monade-mprocs"
-version = "0.2.1"
+version = "0.3.0"
 description = "A fork of the popular mprocs utility, includable via cargo as a library"
-repository = "https://github.com/melefabrizio/mprocs.lib"
+repository = "https://github.com/monade/mprocs.lib"
 authors = ["Fabrizio Mele <fabrizio@mele.io>"]
 license = "MIT"
 edition = "2021"

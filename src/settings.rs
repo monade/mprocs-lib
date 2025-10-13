@@ -150,6 +150,10 @@ impl Settings {
       Key::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
       AppEvent::ToggleFocus,
     );
+    s.keymap_add_t(
+      Key::new(KeyCode::Char('w'), KeyModifiers::NONE),
+      AppEvent::ClearBuffer,
+    );
     s.keymap_add_c(
       Key::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
       AppEvent::ToggleFocus,
@@ -240,6 +244,11 @@ impl Settings {
     s.keymap_add_p(
       Key::new(KeyCode::Char('v'), KeyModifiers::NONE),
       AppEvent::CopyModeEnter,
+    );
+
+    s.keymap_add_p(
+      Key::new(KeyCode::Char('w'), KeyModifiers::NONE),
+      AppEvent::ClearBuffer,
     );
 
     for i in 0..8 {

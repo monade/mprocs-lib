@@ -45,6 +45,8 @@ pub enum AppEvent {
   CopyModeCopy,
 
   SendKey { key: Key },
+
+  ClearBuffer,
 }
 
 impl AppEvent {
@@ -88,6 +90,7 @@ impl AppEvent {
       AppEvent::CopyModeEnd => "Select end position".to_string(),
       AppEvent::CopyModeCopy => "Copy selected text".to_string(),
       AppEvent::SendKey { key } => format!("Send {} key", key.to_string()),
+      AppEvent::ClearBuffer => "Clear proc buffer".to_string(),
     }
   }
 }

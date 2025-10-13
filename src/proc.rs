@@ -418,6 +418,18 @@ impl Proc {
   pub fn scroll_half_screen_down(&mut self) {
     self.scroll_down_lines(self.size.height as usize / 2);
   }
+  
+  pub fn clear_buffer(&mut self) {
+    if let Some(mut vt) = self.lock_vt_mut() {
+      // Get current parser dimensions and scrollback capacity
+      let screen = vt.screen();
+      let size = screen.size();
+      let scrollback_len = screen.scrollback_len();
+
+      // Reinitialize the parser to clear both visible area and scrollback
+      *vt = vt100::Parser::new(size.0, size.1, scrollback_len);
+    }
+  }
 
   pub fn handle_mouse(
     &mut self,

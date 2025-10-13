@@ -765,6 +765,14 @@ impl App {
         }
         LoopAction::Skip
       }
+
+      AppEvent::ClearBuffer => {
+        if let Some(proc) = self.state.get_current_proc_mut() {
+          proc.clear_buffer();
+          return LoopAction::Render;
+        }
+        LoopAction::Skip
+      }
     }
   }
 
