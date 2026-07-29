@@ -321,8 +321,15 @@ pub fn bind_ctl_socket(path: &Path) -> anyhow::Result<CtlSocket> {
     })?;
   }
 
-  let listener = tokio::net::UnixListener::bind(path).with_context(|| {
-    format!("Failed to bind control socket {}", path.display())
+  // The error goes into the message, not just into the source chain: the
+  // callers print `{}` and the cause is what actually helps here (a path
+  // longer than sun_path, a read only directory, ...).
+  let listener = tokio::net::UnixListener::bind(path).map_err(|err| {
+    anyhow::anyhow!(
+      "Failed to bind control socket {}: {}",
+      path.display(),
+      err
+    )
   })?;
   let guard = SocketGuard {
     path: path.to_path_buf(),

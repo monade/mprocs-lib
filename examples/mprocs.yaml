@@ -1,0 +1,76 @@
+# Playground for the control socket and the per-process log files.
+#
+#   cargo build --release
+#   ./target/release/mprocs -c examples/mprocs.yaml \
+#     --ctl-socket /tmp/mprocs.sock \
+#     --log-dir /tmp/mprocs-logs
+#
+# Keep the socket path short: macOS caps a unix socket path at ~104 bytes.
+#
+# Then, from another terminal:
+#
+#   S=/tmp/mprocs.sock
+#   printf '{"type":"request","id":1,"method":"ls"}\n' | nc -U $S
+#   printf '{"type":"request","id":2,"method":"screen","params":{"name":"api"}}\n' | nc -U $S
+#   printf '{"type":"request","id":3,"method":"restart","params":{"pattern":"api"}}\n' | nc -U $S
+#   printf '{"type":"request","id":4,"method":"stop","params":{"pattern":"*worker"}}\n' | nc -U $S
+#   printf '{"type":"request","id":5,"method":"start","params":{"pattern":"*"}}\n' | nc -U $S
+#   printf '{"type":"request","id":6,"method":"shutdown"}\n' | nc -U $S
+#
+# Things worth checking by hand:
+#   - the TUI redraws by itself when a mutating command arrives
+#   - `ls` shows `exited` with the right exit_code after `x` on `crasher`
+#   - `signal` is set (SIGTERM/"Terminated") after `stop` on a running proc
+#   - /tmp/mprocs-logs/<name>.log holds the output and a marker per run
+#   - `weird name/with slash` logs to weird_name_with_slash.log
+#   - quitting with `q` removes /tmp/mprocs.sock
+#
+# Careful with `stubborn`: mprocs waits for every process to go down before it
+# quits, so with `stubborn` running `q` and `shutdown` hang. Use `X` (hard
+# kill) or `kill` over the socket first. That is mprocs' own behaviour, not
+# something the control socket changes.
+
+procs:
+  # Long lived, prints on start: good for `screen` and `restart`.
+  api:
+    shell: "echo 'Listening on 0.0.0.0:3000'; while true; do sleep 5; echo tick; done"
+
+  # A second long lived one, to exercise the `*worker` suffix pattern.
+  api-worker:
+    shell: "echo 'worker ready'; sleep 3600"
+
+  sidekiq-worker:
+    shell: "echo 'sidekiq ready'; sleep 3600"
+
+  # Never starts by itself: `ls` shows it `idle` until you `start` it.
+  migrate:
+    shell: "echo 'running migrations'; sleep 2; echo done"
+    autostart: false
+
+  # Exits non zero right away: `ls` shows `exited` with exit_code 3.
+  crasher:
+    shell: "echo 'about to fail'; exit 3"
+    autostart: false
+
+  # Ignores SIGTERM: `stop` does nothing to it, `kill` is the way out.
+  stubborn:
+    shell: "trap '' TERM; echo 'ignoring SIGTERM'; while true; do sleep 1; done"
+    autostart: false
+
+  # Custom stop signal, to check that `stop` honours the config. The loop
+  # matters: a shell only runs its traps between commands, so `sleep 3600`
+  # in the foreground would swallow the signal for an hour.
+  gentle:
+    shell: "trap 'echo caught SIGINT; exit 0' INT; echo 'waiting'; while true; do sleep 1; done"
+    stop: SIGINT
+    autostart: false
+
+  # Noisy, with colours: the log file keeps the escape sequences, `screen`
+  # gives back plain text.
+  noisy:
+    shell: "i=0; while true; do i=$((i+1)); printf '\\033[32mline %s\\033[0m\\n' $i; sleep 1; done"
+    autostart: false
+
+  # A name that is not a valid file name: the log file is sanitized.
+  "weird name/with slash":
+    shell: "echo 'weird but valid'; sleep 3600"

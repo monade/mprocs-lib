@@ -330,6 +330,57 @@ Commands are encoded as yaml. Available commands:
   `<C-a>`, `<Enter>`
 - `{c: batch, cmds: [{c: focus-procs}, …]}` - Send multiple commands
 
+### Control socket
+
+The remote control above is fire and forget: it sends a command and reads
+nothing back. For querying the state of the stack there is a second,
+request/response channel over a Unix domain socket (unix only, permissions
+`0600`, no TCP). Enable it with `mprocs --ctl-socket /tmp/mprocs.sock`, or from
+the library:
+
+```rust
+mprocs::run_mprocs_with(mprocs::RunOptions {
+  yaml_path: "mprocs.yaml".into(),
+  ctl_socket: Some("/tmp/mprocs.sock".into()),
+  log_dir: Some("/tmp/mprocs-logs".into()),
+  ..Default::default()
+}).await
+```
+
+The socket lives inside the mprocs process: close mprocs and it is gone. There
+is no daemon.
+
+Messages are JSON, one object per line. On connect the server sends a hello
+line, then answers every request in order:
+
+```sh
+printf '{"type":"request","id":1,"method":"ls"}\n' | nc -U /tmp/mprocs.sock
+printf '{"type":"request","id":2,"method":"screen","params":{"name":"api"}}\n' | nc -U /tmp/mprocs.sock
+printf '{"type":"request","id":3,"method":"restart","params":{"pattern":"api"}}\n' | nc -U /tmp/mprocs.sock
+```
+
+Methods:
+
+- `ls` - list the processes with their state (`idle`, `running`, `exited`,
+  `error`), pid, exit code, signal, start time and log file. Takes an optional
+  `params.pattern`.
+- `screen` - the visible screen of one process, as plain text.
+  `params.name` is an exact name.
+- `start`, `stop`, `restart`, `kill` - act on every process matching
+  `params.pattern`. They answer `{"matched": n}` **immediately**: stopping a
+  process is asynchronous, so poll `ls` if you need confirmation.
+- `shutdown` - stop everything and quit.
+
+`pattern` is an exact name or a single `*` used as a prefix, a suffix, or
+"everything" (`api`, `web*`, `*worker`, `*`). No regexes.
+
+When `log_dir` is set (`--log-dir`), each process also tees its raw output,
+escape sequences included, to `<log_dir>/<name>.log`. Read long histories from
+there rather than through the protocol.
+
+The full specification is in
+[`docs/ctl-rpc/01-protocol.md`](docs/ctl-rpc/01-protocol.md).
+
 ## FAQ
 
 ### mprocs vs tmux/screen

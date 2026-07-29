@@ -4,6 +4,8 @@ mod clipboard;
 mod config;
 mod ctl;
 mod ctl_server;
+#[cfg(test)]
+mod ctl_test;
 mod encode_term;
 mod error;
 mod event;
@@ -70,6 +72,13 @@ pub async fn run_mprocs(yaml_path: &str) -> anyhow::Result<()> {
 
 /// Runs mprocs with the given options.
 pub async fn run_mprocs_with(opts: RunOptions) -> anyhow::Result<()> {
+    let (config, keymap) = load_config(&opts)?;
+    run_client_and_server(config, keymap).await
+}
+
+/// Loads the config file named by `opts` and applies the host decisions on top
+/// of it.
+fn load_config(opts: &RunOptions) -> anyhow::Result<(Config, Keymap)> {
     let yaml_path = opts.yaml_path.to_str().ok_or_else(|| {
         anyhow::Error::msg(format!(
             "Config path is not valid UTF-8: {}",
@@ -104,13 +113,13 @@ pub async fn run_mprocs_with(opts: RunOptions) -> anyhow::Result<()> {
 
     // These are decisions of the host, not of the stack: they come from the
     // code, never from the yaml.
-    config.ctl_socket = opts.ctl_socket;
-    config.log_dir = opts.log_dir;
+    config.ctl_socket = opts.ctl_socket.clone();
+    config.log_dir = opts.log_dir.clone();
     if let Some(log_max_bytes) = opts.log_max_bytes {
         config.log_max_bytes = log_max_bytes;
     }
 
-    run_client_and_server(config, keymap).await
+    Ok((config, keymap))
 }
 pub async fn run_app() -> anyhow::Result<()> {
     let matches = command!()

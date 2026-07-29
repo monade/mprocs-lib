@@ -1,4 +1,19 @@
+<!--
+  Version numbers below 0.6.4 belong to the `monade-mprocs` fork and are
+  independent from the ones of upstream mprocs, which this changelog still
+  carries from 0.6.4 down.
+-->
+
 ## Unreleased
+
+- Add `run_mprocs_with(RunOptions)` with optional control socket and
+  per-process log files
+- Add JSON control server over a Unix socket: `ls`, `screen`, `start`, `stop`,
+  `restart`, `kill`, `shutdown`
+- Track process exit code, terminating signal and start time
+- Tee process output to `<log_dir>/<name>.log` when configured
+- Add `--ctl-socket` and `--log-dir` to the `mprocs` binary
+- `run_mprocs(path)` is unchanged and keeps its behaviour
 
 ## 0.6.4 - 2023-02-17
 

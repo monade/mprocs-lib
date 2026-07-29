@@ -792,3 +792,79 @@ impl Pos {
     }
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::{open_log_file, LogFileConfig};
+  use std::io::Write;
+  use std::time::SystemTime;
+
+  fn temp_dir(tag: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_nanos();
+    let path = std::env::temp_dir()
+      .join(format!("mprocs-{}-{}-{}", tag, std::process::id(), nanos));
+    std::fs::create_dir_all(&path).unwrap();
+    path
+  }
+
+  #[test]
+  fn a_log_under_the_ceiling_is_appended_to() {
+    let dir = temp_dir("log-append");
+    let path = dir.join("api.log");
+    std::fs::write(&path, b"from the previous run\n").unwrap();
+
+    let cfg = LogFileConfig {
+      path: path.clone(),
+      max_bytes: 1024,
+    };
+    let mut file = open_log_file(&cfg, "api", 42, SystemTime::now()).unwrap();
+    file.write_all(b"from this run\n").unwrap();
+    drop(file);
+
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(body.contains("from the previous run"), "{}", body);
+    assert!(body.contains("=== mprocs: api started, pid=42, at="), "{}", body);
+    assert!(body.contains("from this run"), "{}", body);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn a_log_over_the_ceiling_is_truncated_on_start() {
+    let dir = temp_dir("log-truncate");
+    let path = dir.join("api.log");
+    std::fs::write(&path, vec![b'x'; 4096]).unwrap();
+
+    let cfg = LogFileConfig {
+      path: path.clone(),
+      max_bytes: 1024,
+    };
+    let file = open_log_file(&cfg, "api", 42, SystemTime::now()).unwrap();
+    drop(file);
+
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(!body.contains('x'), "the old content survived: {} bytes", body.len());
+    assert!(body.contains("=== mprocs: api started"), "{}", body);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn an_unopenable_log_does_not_take_the_process_down() {
+    let dir = temp_dir("log-unopenable");
+    // A directory where the log file should be: opening it must fail.
+    let path = dir.join("api.log");
+    std::fs::create_dir(&path).unwrap();
+
+    let cfg = LogFileConfig {
+      path: path.clone(),
+      max_bytes: 1024,
+    };
+    assert!(open_log_file(&cfg, "api", 42, SystemTime::now()).is_none());
+
+    std::fs::remove_dir_all(&dir).unwrap();
+  }
+}
