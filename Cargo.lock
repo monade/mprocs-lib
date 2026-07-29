@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "monade-mprocs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert_matches",

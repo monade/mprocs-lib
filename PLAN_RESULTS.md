@@ -1,7 +1,7 @@
 # Risultati: controllo e interrogazione dei processi via RPC
 
 Esecuzione di [`PLAN.md`](PLAN.md). Tutti e 5 i task fatti, in ordine, un commit
-ciascuno. Niente version bump, niente push, niente publish.
+ciascuno. Rilasciato come **0.4.0**: additivo, nessuna rottura di API pubblica.
 
 | Task | Commit | Stato |
 |---|---|---|
@@ -49,7 +49,7 @@ Unix domain socket, `0600`, mai TCP. JSON, un oggetto per riga. Il socket vive
 dentro il processo: chiudi mprocs e sparisce, nessun daemon.
 
 ```
-{"type":"hello","protocol":1,"app":"monade-mprocs 0.3.0","features":[]}
+{"type":"hello","protocol":1,"app":"monade-mprocs 0.4.0","features":[]}
 {"type":"request","id":1,"method":"ls","params":{}}
 {"type":"response","id":1,"result":{"procs":[...]}}
 {"type":"response","id":1,"error":{"code":"no_match","message":"..."}}
@@ -182,8 +182,6 @@ lo rende più facile da incontrare: `kill` sul pattern è la via d'uscita.
 
 ## Cosa non ho fatto, di proposito
 
-- **Nessun version bump** e nessun `cargo publish`: le voci di changelog stanno
-  sotto `## Unreleased`, la versione la decidi tu. `RELEASE.md` ha il processo.
 - Nessun daemon, nessun `fork()`. Il processo resta uno.
 - Nessuna lettura dello scrollback via protocollo: per la cronologia lunga c'è
   il file in `log_file`, come da spec.

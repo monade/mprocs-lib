@@ -6,6 +6,8 @@
 
 ## Unreleased
 
+## 0.4.0 - 2026-07-29
+
 - Add `run_mprocs_with(RunOptions)` with optional control socket and
   per-process log files
 - Add JSON control server over a Unix socket: `ls`, `screen`, `start`, `stop`,
