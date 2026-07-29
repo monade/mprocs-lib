@@ -97,6 +97,8 @@ struct RequestEnvelopeIn {
   params: Value,
 }
 
+/// Only the tests build requests; the real clients live in other crates.
+#[cfg(test)]
 #[derive(Serialize)]
 struct RequestEnvelopeOut<'a> {
   #[serde(rename = "type")]
@@ -203,6 +205,7 @@ pub fn parse_request(line: &str) -> Result<(u64, CtlRequest), ParseError> {
 
 /// Encodes a request the way a client has to send it. Used by the tests as the
 /// executable documentation of the wire format.
+#[cfg(test)]
 pub fn request_to_wire(id: u64, req: &CtlRequest) -> String {
   let value = serde_json::to_value(req)
     .expect("CtlRequest is always serializable to a Value");

@@ -122,14 +122,6 @@ impl Config {
       log_max_bytes: DEFAULT_LOG_MAX_BYTES,
     }
   }
-
-  /// Log file of a process, or `None` when file logging is disabled.
-  pub fn log_file_for(&self, proc_name: &str) -> Option<PathBuf> {
-    self
-      .log_dir
-      .as_ref()
-      .map(|dir| log_file_path(dir, proc_name))
-  }
 }
 
 pub struct ProcConfig {
