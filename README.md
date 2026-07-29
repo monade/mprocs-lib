@@ -1,5 +1,10 @@
 # mprocs
 
+> **Nota sul fork.** Questo è `monade-mprocs`, il fork di mprocs usato come libreria da
+> `monade-cli`. C'è del lavoro pianificato: vedi [`PLAN.md`](PLAN.md) per il piano di
+> aggiunta di un server di controllo RPC, e [`REALIGNMENT_ASSESSMENT.md`](REALIGNMENT_ASSESSMENT.md)
+> per la valutazione (scartata per ora) di un riallineamento a mprocs upstream.
+
 _mprocs_ runs multiple commands in parallel and shows output of each command
 separately.
 
