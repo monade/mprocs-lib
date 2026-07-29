@@ -46,6 +46,21 @@ fn epoch_secs(time: SystemTime) -> u64 {
   time.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
+/// Name of the signal that ended a process, or `None` if it exited normally.
+///
+/// `ExitStatus` keeps its `signal` field private and exposes no accessor, so
+/// the name has to come out of the `Display` impl, which writes
+/// `Terminated by <name>`. Patching the vendored crate is not an option: the
+/// published package depends on `mprocs-pty` from crates.io, where the patch
+/// does not exist. If that string ever changes this returns `None`, which is
+/// better than returning something wrong.
+fn signal_name(status: &portable_pty::ExitStatus) -> Option<String> {
+  status
+    .to_string()
+    .strip_prefix("Terminated by ")
+    .map(str::to_string)
+}
+
 /// Opens the log file of a process in append mode, truncating it first when it
 /// grew past `max_bytes`, and writes the marker separating this run from the
 /// previous ones. Returns `None` (after a warning) if anything goes wrong: a
@@ -193,10 +208,9 @@ impl Inst {
         let status = child.wait();
         running.store(false, Ordering::Relaxed);
         let (exit_code, signal) = match &status {
-          Ok(status) => (
-            Some(status.exit_code() as i32),
-            status.signal().map(|s| s.to_string()),
-          ),
+          Ok(status) => {
+            (Some(status.exit_code() as i32), signal_name(status))
+          }
           Err(_) => (None, None),
         };
         let _result = tx.send((id, ProcUpdate::Stopped { exit_code, signal }));
@@ -795,9 +809,21 @@ impl Pos {
 
 #[cfg(test)]
 mod tests {
-  use super::{open_log_file, LogFileConfig};
+  use super::{open_log_file, signal_name, LogFileConfig};
   use std::io::Write;
   use std::time::SystemTime;
+
+  /// `signal_name` reads the name out of the `Display` impl of `ExitStatus`,
+  /// because the field is private in the published `mprocs-pty`. If upstream
+  /// ever rewords that string, this test is what notices.
+  #[test]
+  fn the_signal_name_comes_out_of_the_exit_status() {
+    let killed = portable_pty::ExitStatus::with_signal("Terminated: 15");
+    assert_eq!(signal_name(&killed).as_deref(), Some("Terminated: 15"));
+
+    assert_eq!(signal_name(&portable_pty::ExitStatus::with_exit_code(0)), None);
+    assert_eq!(signal_name(&portable_pty::ExitStatus::with_exit_code(3)), None);
+  }
 
   fn temp_dir(tag: &str) -> std::path::PathBuf {
     let nanos = SystemTime::now()
