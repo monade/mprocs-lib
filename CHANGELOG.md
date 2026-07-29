@@ -6,6 +6,12 @@
 
 ## Unreleased
 
+## 0.4.1 - 2026-07-29
+
+- Ship README.md in the published package. The package root is `src/`, so cargo
+  was looking for `src/README.md` and crates.io had no page to show.
+- No code changes.
+
 ## 0.4.0 - 2026-07-29
 
 - Add `run_mprocs_with(RunOptions)` with optional control socket and
