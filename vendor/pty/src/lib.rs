@@ -189,6 +189,11 @@ impl ExitStatus {
   pub fn exit_code(&self) -> u32 {
     self.code
   }
+
+  /// Returns the name of the signal that terminated the process, if any.
+  pub fn signal(&self) -> Option<&str> {
+    self.signal.as_deref()
+  }
 }
 
 impl From<std::process::ExitStatus> for ExitStatus {

@@ -202,12 +202,21 @@ impl App {
   }
 
   fn start_procs(&mut self, size: Rect) -> anyhow::Result<()> {
+    let log_dir = self.config.log_dir.clone();
+    let log_max_bytes = self.config.log_max_bytes;
     let mut procs = self
       .config
       .procs
       .iter()
       .map(|proc_cfg| {
-        Proc::new(proc_cfg.name.clone(), proc_cfg, self.upd_tx.clone(), size)
+        Proc::new(
+          proc_cfg.name.clone(),
+          proc_cfg,
+          self.upd_tx.clone(),
+          size,
+          log_dir.as_deref(),
+          log_max_bytes,
+        )
       })
       .collect::<Vec<_>>();
 
@@ -615,6 +624,8 @@ impl App {
         LoopAction::Render
       }
       AppEvent::AddProc { cmd } => {
+        let log_dir = self.config.log_dir.clone();
+        let log_max_bytes = self.config.log_max_bytes;
         let proc = Proc::new(
           cmd.to_string(),
           &ProcConfig {
@@ -629,6 +640,8 @@ impl App {
           },
           self.upd_tx.clone(),
           self.get_layout().term_area(),
+          log_dir.as_deref(),
+          log_max_bytes,
         );
         self.state.procs.push(proc);
         LoopAction::Render
@@ -789,9 +802,12 @@ impl App {
         }
         LoopAction::Skip
       }
-      ProcUpdate::Stopped => {
+      ProcUpdate::Stopped { exit_code, signal } => {
         if let Some(proc) = self.state.get_proc_mut(event.0) {
+          proc.last_exit_code = exit_code;
+          proc.last_signal = signal;
           if proc.to_restart {
+            // `start()` clears the exit status again: a new run begins.
             proc.start();
             proc.to_restart = false;
           }
