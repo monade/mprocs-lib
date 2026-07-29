@@ -3,6 +3,7 @@ mod client;
 mod clipboard;
 mod config;
 mod ctl;
+mod ctl_server;
 mod encode_term;
 mod error;
 mod event;

@@ -804,6 +804,7 @@ dependencies = [
  "mprocs-vt100",
  "phf 0.10.1",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tokio",
  "triggered",
