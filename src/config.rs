@@ -1,4 +1,8 @@
-use std::{ffi::OsString, path::PathBuf, str::FromStr};
+use std::{
+  ffi::OsString,
+  path::{Path, PathBuf},
+  str::FromStr,
+};
 
 use anyhow::{bail, Result};
 use indexmap::IndexMap;
@@ -16,12 +20,49 @@ pub struct ConfigContext {
   pub path: PathBuf,
 }
 
+/// Default ceiling for a per-process log file. Beyond this size the file is
+/// truncated the next time the process starts.
+pub const DEFAULT_LOG_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
 pub struct Config {
   pub procs: Vec<ProcConfig>,
   pub server: Option<ServerConfig>,
   pub hide_keymap_window: bool,
   pub mouse_scroll_speed: usize,
   pub proc_list_width: usize,
+
+  /// Path of the control socket. Set from `RunOptions`, never from yaml.
+  pub ctl_socket: Option<PathBuf>,
+  /// Directory holding the per-process log files. Set from `RunOptions`,
+  /// never from yaml.
+  pub log_dir: Option<PathBuf>,
+  pub log_max_bytes: u64,
+}
+
+/// Replaces everything that is not `[A-Za-z0-9._-]` with `_`, so that a
+/// process name written by a human can be used as a file name.
+pub fn sanitize_proc_name(name: &str) -> String {
+  let sanitized = name
+    .chars()
+    .map(|c| {
+      if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+        c
+      } else {
+        '_'
+      }
+    })
+    .collect::<String>();
+  // `.` and `..` would escape the log dir once `.log` is appended.
+  if sanitized.chars().all(|c| c == '.') {
+    "_".repeat(sanitized.len().max(1))
+  } else {
+    sanitized
+  }
+}
+
+/// Path of the log file of a process, inside `log_dir`.
+pub fn log_file_path(log_dir: &Path, proc_name: &str) -> PathBuf {
+  log_dir.join(format!("{}.log", sanitize_proc_name(proc_name)))
 }
 
 impl Config {
@@ -61,6 +102,9 @@ impl Config {
       hide_keymap_window: settings.hide_keymap_window,
       mouse_scroll_speed: settings.mouse_scroll_speed,
       proc_list_width: settings.proc_list_width,
+      ctl_socket: None,
+      log_dir: None,
+      log_max_bytes: DEFAULT_LOG_MAX_BYTES,
     };
 
     Ok(config)
@@ -73,6 +117,9 @@ impl Config {
       hide_keymap_window: settings.hide_keymap_window,
       mouse_scroll_speed: settings.mouse_scroll_speed,
       proc_list_width: settings.proc_list_width,
+      ctl_socket: None,
+      log_dir: None,
+      log_max_bytes: DEFAULT_LOG_MAX_BYTES,
     }
   }
 }
@@ -292,5 +339,39 @@ impl From<&ProcConfig> for CommandBuilder {
     }
 
     cmd
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{log_file_path, sanitize_proc_name};
+  use std::path::Path;
+
+  #[test]
+  fn sanitize_keeps_safe_names() {
+    assert_eq!(sanitize_proc_name("api"), "api");
+    assert_eq!(sanitize_proc_name("web-1.0_x"), "web-1.0_x");
+  }
+
+  #[test]
+  fn sanitize_replaces_separators_and_spaces() {
+    assert_eq!(sanitize_proc_name("foo/bar baz"), "foo_bar_baz");
+    assert_eq!(sanitize_proc_name("a\\b"), "a_b");
+    assert_eq!(sanitize_proc_name("Ünïcode"), "_n_code");
+  }
+
+  #[test]
+  fn log_file_stays_inside_the_log_dir() {
+    let dir = Path::new("/tmp/logs");
+    for name in ["foo/bar baz", "..", "../../etc/passwd", ".", "/"] {
+      let path = log_file_path(dir, name);
+      assert_eq!(
+        path.parent(),
+        Some(dir),
+        "name {:?} escaped the log dir: {:?}",
+        name,
+        path
+      );
+    }
   }
 }

@@ -1,5 +1,10 @@
 # mprocs
 
+> **Nota sul fork.** Questo è `monade-mprocs`, il fork di mprocs usato come libreria da
+> `monade-cli`. C'è del lavoro pianificato: vedi [`PLAN.md`](PLAN.md) per il piano di
+> aggiunta di un server di controllo RPC, e [`REALIGNMENT_ASSESSMENT.md`](REALIGNMENT_ASSESSMENT.md)
+> per la valutazione (scartata per ora) di un riallineamento a mprocs upstream.
+
 _mprocs_ runs multiple commands in parallel and shows output of each command
 separately.
 
@@ -32,6 +37,7 @@ shows output of each command separately and allows to interact with processes
     - [Running scripts from package.json](#running-scripts-from-packagejson)
   - [Default keymap](#default-keymap)
   - [Remote control](#remote-control)
+  - [Control socket](#control-socket)
 - [FAQ](#faq)
   - [mprocs vs tmux/screen](#mprocs-vs-tmuxscreen)
 
@@ -324,6 +330,92 @@ Commands are encoded as yaml. Available commands:
 - `{c: send-key, key: "<KEY>"}` - Send key to current process. Key examples:
   `<C-a>`, `<Enter>`
 - `{c: batch, cmds: [{c: focus-procs}, …]}` - Send multiple commands
+
+### Control socket
+
+The remote control above is fire and forget: it sends a command and reads
+nothing back. For querying the state of the stack there is a second,
+request/response channel over a Unix domain socket (unix only, permissions
+`0600`, no TCP). Enable it with `mprocs --ctl-socket /tmp/mprocs.sock`, or from
+the library:
+
+```rust
+mprocs::run_mprocs_with(mprocs::RunOptions {
+  yaml_path: "mprocs.yaml".into(),
+  ctl_socket: Some("/tmp/mprocs.sock".into()),
+  log_dir: Some("/tmp/mprocs-logs".into()),
+  ..Default::default()
+}).await
+```
+
+The socket lives inside the mprocs process: close mprocs and it is gone. There
+is no daemon.
+
+Messages are JSON, one object per line. On connect the server sends a hello
+line, then answers every request in order:
+
+```sh
+printf '{"type":"request","id":1,"method":"ls"}\n' | nc -U /tmp/mprocs.sock
+printf '{"type":"request","id":2,"method":"screen","params":{"name":"api"}}\n' | nc -U /tmp/mprocs.sock
+printf '{"type":"request","id":3,"method":"restart","params":{"pattern":"api"}}\n' | nc -U /tmp/mprocs.sock
+```
+
+A connection can carry several requests in a row, or you can open one per
+request, as the examples above do. `params` may be omitted when the method
+takes no arguments.
+
+```json
+{"type":"hello","protocol":1,"app":"monade-mprocs 0.4.0","features":[]}
+{"type":"response","id":1,"result":{"procs":[
+  {"name":"api","id":1,"state":"running","pid":54321,"started_at":1753790000,
+   "log_file":"/tmp/mprocs-logs/api.log"},
+  {"name":"worker","id":2,"state":"exited","exit_code":1,"signal":null,
+   "started_at":1753789000,"log_file":"/tmp/mprocs-logs/worker.log"},
+  {"name":"mailhog","id":3,"state":"idle","log_file":null}
+]}}
+{"type":"response","id":2,"error":{"code":"no_match","message":"no proc named 'api'"}}
+```
+
+`result` and `error` are mutually exclusive. Error codes are `unknown_method`,
+`invalid_params`, `no_match` and `internal`. Clients must ignore fields they do
+not know: adding methods, fields or error codes does not bump `protocol`.
+
+Methods:
+
+- `ls` - list the processes with their state (`idle`, `running`, `exited`,
+  `error`), pid, exit code, signal, start time and log file. Takes an optional
+  `params.pattern`.
+- `screen` - the visible screen of one process, as plain text.
+  `params.name` is an exact name.
+- `start`, `stop`, `restart`, `kill` - act on every process matching
+  `params.pattern`. They answer `{"matched": n}` **immediately**: stopping a
+  process is asynchronous, so poll `ls` if you need confirmation.
+- `shutdown` - stop everything and quit.
+
+`pattern` is an exact name or a single `*` used as a prefix, a suffix, or
+"everything" (`api`, `web*`, `*worker`, `*`). No regexes.
+
+When `log_dir` is set (`--log-dir`), each process also tees its raw output,
+escape sequences included, to `<log_dir>/<name>.log`. The name is sanitized, so
+a process called `weird name/with slash` logs to `weird_name_with_slash.log`.
+Every run is preceded by a `=== mprocs: <name> started, pid=…, at=… ===`
+marker, and a file that grew past `log_max_bytes` (8 MiB by default) is
+truncated when the process restarts. Read long histories from there rather than
+through the protocol.
+
+Two things to know:
+
+- Keep the socket path short. macOS caps a unix socket path at about 104
+  bytes and the bind fails past that.
+- mprocs waits for every process to go down before it quits, so a process
+  ignoring `SIGTERM` makes `q` and `shutdown` hang. Use `kill` over the socket,
+  or `X` in the TUI.
+
+[`examples/mprocs.yaml`](examples/mprocs.yaml) is a playground covering every
+method and edge case, with the commands to copy in its comments.
+
+The full specification is in
+[`docs/ctl-rpc/01-protocol.md`](docs/ctl-rpc/01-protocol.md).
 
 ## FAQ
 

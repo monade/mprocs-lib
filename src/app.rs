@@ -14,6 +14,9 @@ use tui_input::Input;
 use crate::{
   clipboard::copy,
   config::{CmdConfig, Config, ProcConfig, ServerConfig},
+  ctl_server::{
+    CtlMessage, CtlRequest, CtlResponse, ERR_NO_MATCH,
+  },
   event::{AppEvent, CopyMove},
   key::Key,
   keymap::Keymap,
@@ -48,6 +51,22 @@ pub struct App {
   upd_tx: UnboundedSender<(usize, ProcUpdate)>,
   ev_rx: UnboundedReceiver<AppEvent>,
   ev_tx: UnboundedSender<AppEvent>,
+  /// Requests coming from the control socket. Stays inert when no socket is
+  /// configured: nobody ever writes on the other end.
+  ctl_rx: UnboundedReceiver<CtlMessage>,
+}
+
+/// Matches a process name against a control pattern: an exact name, or a
+/// single `*` used as a prefix, a suffix, or "everything".
+fn matches(pattern: &str, name: &str) -> bool {
+  match pattern.split_once('*') {
+    None => pattern == name,
+    Some((prefix, suffix)) => {
+      name.len() >= prefix.len() + suffix.len()
+        && name.starts_with(prefix)
+        && name.ends_with(suffix)
+    }
+  }
 }
 
 impl App {
@@ -181,6 +200,23 @@ impl App {
             LoopAction::Skip
           }
         }
+        msg = self.ctl_rx.recv().fuse() => {
+          if let Some((req, reply)) = msg {
+            let quitting = matches!(req, CtlRequest::Shutdown {});
+            let (response, action) = self.handle_ctl(req);
+            // An error here only means the client hung up before the answer.
+            let _ = reply.send(response);
+            if quitting {
+              // Answer first, shut down after: otherwise the client never
+              // gets the response.
+              self.handle_event(&AppEvent::Quit)
+            } else {
+              action
+            }
+          } else {
+            LoopAction::Skip
+          }
+        }
       };
 
       if self.state.quitting && self.state.all_procs_down() {
@@ -202,12 +238,21 @@ impl App {
   }
 
   fn start_procs(&mut self, size: Rect) -> anyhow::Result<()> {
+    let log_dir = self.config.log_dir.clone();
+    let log_max_bytes = self.config.log_max_bytes;
     let mut procs = self
       .config
       .procs
       .iter()
       .map(|proc_cfg| {
-        Proc::new(proc_cfg.name.clone(), proc_cfg, self.upd_tx.clone(), size)
+        Proc::new(
+          proc_cfg.name.clone(),
+          proc_cfg,
+          self.upd_tx.clone(),
+          size,
+          log_dir.as_deref(),
+          log_max_bytes,
+        )
       })
       .collect::<Vec<_>>();
 
@@ -615,6 +660,8 @@ impl App {
         LoopAction::Render
       }
       AppEvent::AddProc { cmd } => {
+        let log_dir = self.config.log_dir.clone();
+        let log_max_bytes = self.config.log_max_bytes;
         let proc = Proc::new(
           cmd.to_string(),
           &ProcConfig {
@@ -629,6 +676,8 @@ impl App {
           },
           self.upd_tx.clone(),
           self.get_layout().term_area(),
+          log_dir.as_deref(),
+          log_max_bytes,
         );
         self.state.procs.push(proc);
         LoopAction::Render
@@ -776,6 +825,107 @@ impl App {
     }
   }
 
+  /// Answers a control request. Runs inside the main loop, so it sees the
+  /// same `State` the TUI is drawing, with no lock and no race.
+  ///
+  /// `Shutdown` is answered here but performed by the caller, after the
+  /// response has been handed back to the client.
+  fn handle_ctl(&mut self, req: CtlRequest) -> (CtlResponse, LoopAction) {
+    match req {
+      CtlRequest::Ls { pattern } => {
+        let procs = self
+          .state
+          .procs
+          .iter()
+          .filter(|proc| {
+            pattern
+              .as_deref()
+              .map_or(true, |pattern| matches(pattern, &proc.name))
+          })
+          .map(describe_proc)
+          .collect::<Vec<_>>();
+        (
+          CtlResponse::Ok(serde_json::json!({ "procs": procs })),
+          LoopAction::Skip,
+        )
+      }
+
+      CtlRequest::Screen { name } => {
+        let response = match self
+          .state
+          .procs
+          .iter()
+          .find(|proc| proc.name == name)
+        {
+          None => CtlResponse::err(
+            ERR_NO_MATCH,
+            format!("no proc named '{}'", name),
+          ),
+          // `lock_vt` and not `lock_vt_mut`: the mutable one is for whoever
+          // moves the scrollback offset, which is what the user is looking at.
+          Some(proc) => match proc.lock_vt() {
+            None => {
+              CtlResponse::Ok(serde_json::json!({ "screen": serde_json::Value::Null }))
+            }
+            Some(vt) => CtlResponse::Ok(
+              serde_json::json!({ "screen": vt.screen().contents() }),
+            ),
+          },
+        };
+        (response, LoopAction::Skip)
+      }
+
+      // These act on every process matching the pattern, not on the one
+      // selected in the TUI, so they cannot go through `AppEvent`.
+      CtlRequest::Start { pattern } => {
+        let matched = self.for_each_matching(&pattern, |proc| proc.start());
+        (matched_response(matched), LoopAction::Render)
+      }
+      CtlRequest::Stop { pattern } => {
+        let matched = self.for_each_matching(&pattern, |proc| proc.stop());
+        (matched_response(matched), LoopAction::Render)
+      }
+      CtlRequest::Kill { pattern } => {
+        let matched = self.for_each_matching(&pattern, |proc| proc.kill());
+        (matched_response(matched), LoopAction::Render)
+      }
+      CtlRequest::Restart { pattern } => {
+        // The actual restart is done by `handle_proc_update` when
+        // `ProcUpdate::Stopped` arrives.
+        let matched = self.for_each_matching(&pattern, |proc| {
+          if proc.is_up() {
+            proc.stop();
+            proc.to_restart = true;
+          } else {
+            proc.start();
+          }
+        });
+        (matched_response(matched), LoopAction::Render)
+      }
+
+      CtlRequest::Shutdown {} => {
+        (CtlResponse::Ok(serde_json::json!({})), LoopAction::Render)
+      }
+    }
+  }
+
+  /// Runs `f` on every process whose name matches `pattern`. Returns how many
+  /// were touched; zero is not an error.
+  fn for_each_matching<F: FnMut(&mut Proc)>(
+    &mut self,
+    pattern: &str,
+    mut f: F,
+  ) -> usize {
+    let mut matched = 0;
+    for proc in self.state.procs.iter_mut() {
+      if matches(pattern, &proc.name) {
+        f(proc);
+        matched += 1;
+      }
+    }
+    matched
+  }
+
   fn handle_proc_update(&mut self, event: (usize, ProcUpdate)) -> LoopAction {
     match event.1 {
       ProcUpdate::Render => {
@@ -789,9 +939,12 @@ impl App {
         }
         LoopAction::Skip
       }
-      ProcUpdate::Stopped => {
+      ProcUpdate::Stopped { exit_code, signal } => {
         if let Some(proc) = self.state.get_proc_mut(event.0) {
+          proc.last_exit_code = exit_code;
+          proc.last_signal = signal;
           if proc.to_restart {
+            // `start()` clears the exit status again: a new run begins.
             proc.start();
             proc.to_restart = false;
           }
@@ -809,6 +962,69 @@ impl App {
       &self.config,
     )
   }
+}
+
+fn matched_response(matched: usize) -> CtlResponse {
+  CtlResponse::Ok(serde_json::json!({ "matched": matched }))
+}
+
+/// One entry of the `ls` answer. See `docs/ctl-rpc/01-protocol.md#ls`.
+fn describe_proc(proc: &Proc) -> serde_json::Value {
+  use serde_json::{Map, Value};
+
+  let mut obj = Map::new();
+  obj.insert("name".to_string(), Value::from(proc.name.as_str()));
+  obj.insert("id".to_string(), Value::from(proc.id));
+
+  match &proc.inst {
+    // `is_up()` alone cannot tell `idle` from `exited`: both are down.
+    ProcState::None => {
+      obj.insert("state".to_string(), Value::from("idle"));
+    }
+    ProcState::Some(inst) => {
+      let running = inst.running.load(std::sync::atomic::Ordering::Relaxed);
+      if running {
+        obj.insert("state".to_string(), Value::from("running"));
+        // Only while running: the pid of a dead process is a trap.
+        obj.insert("pid".to_string(), Value::from(inst.pid));
+      } else {
+        obj.insert("state".to_string(), Value::from("exited"));
+        obj.insert(
+          "exit_code".to_string(),
+          proc.last_exit_code.map_or(Value::Null, Value::from),
+        );
+        obj.insert(
+          "signal".to_string(),
+          proc
+            .last_signal
+            .as_deref()
+            .map_or(Value::Null, Value::from),
+        );
+      }
+      if let Ok(since_epoch) =
+        inst.started_at.duration_since(std::time::UNIX_EPOCH)
+      {
+        obj.insert(
+          "started_at".to_string(),
+          Value::from(since_epoch.as_secs()),
+        );
+      }
+    }
+    ProcState::Error(message) => {
+      obj.insert("state".to_string(), Value::from("error"));
+      obj.insert("message".to_string(), Value::from(message.as_str()));
+    }
+  }
+
+  obj.insert(
+    "log_file".to_string(),
+    proc
+      .log_file
+      .as_ref()
+      .map_or(Value::Null, |path| Value::from(path.to_string_lossy())),
+  );
+
+  Value::Object(obj)
 }
 
 struct AppLayout {
@@ -865,6 +1081,7 @@ pub async fn server_main(
   keymap: Keymap,
   client_tx: tokio::sync::mpsc::UnboundedSender<SrvToClt>,
   mut client_rx: tokio::sync::mpsc::Receiver<CltToSrv>,
+  ctl_rx: UnboundedReceiver<CtlMessage>,
 ) -> anyhow::Result<()> {
   let init = client_rx
     .recv()
@@ -910,10 +1127,55 @@ pub async fn server_main(
 
     ev_rx,
     ev_tx,
+    ctl_rx,
   };
   let client_tx = app.client_tx.clone();
   app.run().await?;
   client_tx.send(SrvToClt::Quit).unwrap();
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::matches;
+
+  #[test]
+  fn exact_name() {
+    assert!(matches("api", "api"));
+    assert!(!matches("api", "api2"));
+    assert!(!matches("api", "2api"));
+    assert!(!matches("api", "API"));
+  }
+
+  #[test]
+  fn everything() {
+    assert!(matches("*", "api"));
+    assert!(matches("*", ""));
+    assert!(matches("*", "sidekiq-worker"));
+  }
+
+  #[test]
+  fn prefix() {
+    assert!(matches("web*", "web"));
+    assert!(matches("web*", "webpack"));
+    assert!(!matches("web*", "api"));
+    assert!(!matches("web*", "we"));
+  }
+
+  #[test]
+  fn suffix() {
+    assert!(matches("*worker", "worker"));
+    assert!(matches("*worker", "sidekiq-worker"));
+    assert!(!matches("*worker", "worker-x"));
+    assert!(!matches("*worker", "api"));
+  }
+
+  #[test]
+  fn prefix_and_suffix_do_not_overlap() {
+    // "ab" must not satisfy both sides of "ab*ab" with the same characters.
+    assert!(!matches("ab*ab", "ab"));
+    assert!(matches("ab*ab", "abab"));
+    assert!(matches("ab*ab", "abXab"));
+  }
 }

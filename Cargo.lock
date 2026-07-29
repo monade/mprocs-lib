@@ -785,7 +785,7 @@ dependencies = [
 
 [[package]]
 name = "monade-mprocs"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -804,6 +804,7 @@ dependencies = [
  "mprocs-vt100",
  "phf 0.10.1",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tokio",
  "triggered",

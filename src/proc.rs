@@ -1,8 +1,11 @@
 use std::fmt::Debug;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::{self, spawn};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use assert_matches::assert_matches;
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
@@ -27,6 +30,71 @@ pub struct Inst {
   pub killer: Box<dyn ChildKiller + Send + Sync>,
 
   pub running: Arc<AtomicBool>,
+
+  /// When this instance was spawned.
+  pub started_at: SystemTime,
+}
+
+/// Where and how a process tees its pty output.
+#[derive(Clone, Debug)]
+pub struct LogFileConfig {
+  pub path: PathBuf,
+  pub max_bytes: u64,
+}
+
+fn epoch_secs(time: SystemTime) -> u64 {
+  time.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
+
+/// Opens the log file of a process in append mode, truncating it first when it
+/// grew past `max_bytes`, and writes the marker separating this run from the
+/// previous ones. Returns `None` (after a warning) if anything goes wrong: a
+/// full disk must not take down the process nor the TUI.
+fn open_log_file(
+  cfg: &LogFileConfig,
+  proc_name: &str,
+  pid: u32,
+  started_at: SystemTime,
+) -> Option<File> {
+  fn open(cfg: &LogFileConfig) -> std::io::Result<File> {
+    if let Some(parent) = cfg.path.parent() {
+      std::fs::create_dir_all(parent)?;
+    }
+    let too_big = std::fs::metadata(&cfg.path)
+      .map_or(false, |meta| meta.len() > cfg.max_bytes);
+    let mut opts = OpenOptions::new();
+    opts.create(true).write(true);
+    if too_big {
+      opts.truncate(true);
+    } else {
+      opts.append(true);
+    }
+    opts.open(&cfg.path)
+  }
+
+  match open(cfg) {
+    Ok(mut file) => {
+      let marker = format!(
+        "\n=== mprocs: {} started, pid={}, at={} ===\n",
+        proc_name,
+        pid,
+        epoch_secs(started_at)
+      );
+      if let Err(err) = file.write_all(marker.as_bytes()) {
+        log::warn!(
+          "Failed to write to log file {}: {}",
+          cfg.path.display(),
+          err
+        );
+        return None;
+      }
+      Some(file)
+    }
+    Err(err) => {
+      log::warn!("Failed to open log file {}: {}", cfg.path.display(), err);
+      None
+    }
+  }
 }
 
 impl Debug for Inst {
@@ -46,6 +114,8 @@ impl Inst {
     cmd: CommandBuilder,
     tx: UnboundedSender<(usize, ProcUpdate)>,
     size: &Size,
+    name: &str,
+    log: Option<&LogFileConfig>,
   ) -> anyhow::Result<Self> {
     let vt = vt100::Parser::new(size.height, size.width, 1000);
     let vt = Arc::new(RwLock::new(vt));
@@ -60,15 +130,21 @@ impl Inst {
 
     let running = Arc::new(AtomicBool::new(true));
     let mut child = pair.slave.spawn_command(cmd)?;
+    let started_at = SystemTime::now();
     let pid = child.process_id().unwrap_or(0);
     let killer = child.clone_killer();
 
     let mut reader = pair.master.try_clone_reader().unwrap();
 
+    let log_file =
+      log.and_then(|cfg| open_log_file(cfg, name, pid, started_at));
+    let log_path = log.map(|cfg| cfg.path.clone());
+
     {
       let tx = tx.clone();
       let vt = vt.clone();
       let running = running.clone();
+      let mut log_file = log_file;
       spawn_blocking(move || {
         let mut buf = [0; 4 * 1024];
         loop {
@@ -79,6 +155,19 @@ impl Inst {
           match reader.read(&mut buf[..]) {
             Ok(count) => {
               if count > 0 {
+                // Tee the raw bytes, escape sequences included: stripping
+                // them here would lose information and needs a parser. The
+                // consumer of the log file does the stripping.
+                if let Some(file) = &mut log_file {
+                  if let Err(err) = file.write_all(&buf[..count]) {
+                    log::warn!(
+                      "Failed to write to log file {}: {}. Log disabled for this run.",
+                      log_path.as_deref().unwrap_or(Path::new("?")).display(),
+                      err
+                    );
+                    log_file = None;
+                  }
+                }
                 if let Ok(mut vt) = vt.write() {
                   vt.process(&buf[..count]);
                   match tx.send((id, ProcUpdate::Render)) {
@@ -101,9 +190,16 @@ impl Inst {
       let running = running.clone();
       spawn(move || {
         // Block until program exits
-        let _status = child.wait();
+        let status = child.wait();
         running.store(false, Ordering::Relaxed);
-        let _result = tx.send((id, ProcUpdate::Stopped));
+        let (exit_code, signal) = match &status {
+          Ok(status) => (
+            Some(status.exit_code() as i32),
+            status.signal().map(|s| s.to_string()),
+          ),
+          Err(_) => (None, None),
+        };
+        let _result = tx.send((id, ProcUpdate::Stopped { exit_code, signal }));
       });
     }
 
@@ -115,6 +211,8 @@ impl Inst {
       killer,
 
       running,
+
+      started_at,
     };
     Ok(inst)
   }
@@ -153,6 +251,17 @@ pub struct Proc {
 
   pub inst: ProcState,
   pub copy_mode: CopyMode,
+
+  /// Exit code of the last finished run, if it is known.
+  pub last_exit_code: Option<i32>,
+  /// Name of the signal that ended the last run, if any.
+  pub last_signal: Option<String>,
+
+  /// Directory of the log files, when file logging is enabled.
+  log_dir: Option<PathBuf>,
+  log_max_bytes: u64,
+  /// Log file of this process. Recomputed on rename.
+  pub log_file: Option<PathBuf>,
 }
 
 static NEXT_PROC_ID: AtomicUsize = AtomicUsize::new(1);
@@ -167,7 +276,10 @@ pub enum ProcState {
 #[derive(Debug)]
 pub enum ProcUpdate {
   Render,
-  Stopped,
+  Stopped {
+    exit_code: Option<i32>,
+    signal: Option<String>,
+  },
   Started,
 }
 
@@ -196,9 +308,14 @@ impl Proc {
     cfg: &ProcConfig,
     tx: UnboundedSender<(usize, ProcUpdate)>,
     size: Rect,
+    log_dir: Option<&Path>,
+    log_max_bytes: u64,
   ) -> Self {
     let id = NEXT_PROC_ID.fetch_add(1, Ordering::Relaxed);
     let size = Size::new(size);
+    let log_dir = log_dir.map(|dir| dir.to_path_buf());
+    let log_file =
+      log_dir.as_ref().map(|dir| crate::config::log_file_path(dir, &name));
     let mut proc = Proc {
       id,
       name,
@@ -213,6 +330,13 @@ impl Proc {
 
       inst: ProcState::None,
       copy_mode: CopyMode::None(None),
+
+      last_exit_code: None,
+      last_signal: None,
+
+      log_dir,
+      log_max_bytes,
+      log_file,
     };
 
     if cfg.autostart {
@@ -222,11 +346,25 @@ impl Proc {
     proc
   }
 
+  fn log_config(&self) -> Option<LogFileConfig> {
+    self.log_file.as_ref().map(|path| LogFileConfig {
+      path: path.clone(),
+      max_bytes: self.log_max_bytes,
+    })
+  }
+
   fn spawn_new_inst(&mut self) {
     assert_matches!(self.inst, ProcState::None);
 
-    let spawned =
-      Inst::spawn(self.id, self.cmd.clone(), self.tx.clone(), &self.size);
+    let log = self.log_config();
+    let spawned = Inst::spawn(
+      self.id,
+      self.cmd.clone(),
+      self.tx.clone(),
+      &self.size,
+      &self.name,
+      log.as_ref(),
+    );
     let inst = match spawned {
       Ok(inst) => ProcState::Some(inst),
       Err(err) => ProcState::Error(err.to_string()),
@@ -237,6 +375,8 @@ impl Proc {
   pub fn start(&mut self) {
     if !self.is_up() {
       self.inst = ProcState::None;
+      self.last_exit_code = None;
+      self.last_signal = None;
       self.spawn_new_inst();
 
       let _res = self.tx.send((self.id, ProcUpdate::Started));
@@ -311,6 +451,10 @@ impl Proc {
 
   pub fn rename(&mut self, name: &str) {
     self.name.replace_range(.., &name);
+    self.log_file = self
+      .log_dir
+      .as_ref()
+      .map(|dir| crate::config::log_file_path(dir, &self.name));
   }
 
   #[cfg(not(windows))]
@@ -646,5 +790,81 @@ impl Pos {
     } else {
       false
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::{open_log_file, LogFileConfig};
+  use std::io::Write;
+  use std::time::SystemTime;
+
+  fn temp_dir(tag: &str) -> std::path::PathBuf {
+    let nanos = SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .unwrap()
+      .as_nanos();
+    let path = std::env::temp_dir()
+      .join(format!("mprocs-{}-{}-{}", tag, std::process::id(), nanos));
+    std::fs::create_dir_all(&path).unwrap();
+    path
+  }
+
+  #[test]
+  fn a_log_under_the_ceiling_is_appended_to() {
+    let dir = temp_dir("log-append");
+    let path = dir.join("api.log");
+    std::fs::write(&path, b"from the previous run\n").unwrap();
+
+    let cfg = LogFileConfig {
+      path: path.clone(),
+      max_bytes: 1024,
+    };
+    let mut file = open_log_file(&cfg, "api", 42, SystemTime::now()).unwrap();
+    file.write_all(b"from this run\n").unwrap();
+    drop(file);
+
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(body.contains("from the previous run"), "{}", body);
+    assert!(body.contains("=== mprocs: api started, pid=42, at="), "{}", body);
+    assert!(body.contains("from this run"), "{}", body);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn a_log_over_the_ceiling_is_truncated_on_start() {
+    let dir = temp_dir("log-truncate");
+    let path = dir.join("api.log");
+    std::fs::write(&path, vec![b'x'; 4096]).unwrap();
+
+    let cfg = LogFileConfig {
+      path: path.clone(),
+      max_bytes: 1024,
+    };
+    let file = open_log_file(&cfg, "api", 42, SystemTime::now()).unwrap();
+    drop(file);
+
+    let body = std::fs::read_to_string(&path).unwrap();
+    assert!(!body.contains('x'), "the old content survived: {} bytes", body.len());
+    assert!(body.contains("=== mprocs: api started"), "{}", body);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+  }
+
+  #[test]
+  fn an_unopenable_log_does_not_take_the_process_down() {
+    let dir = temp_dir("log-unopenable");
+    // A directory where the log file should be: opening it must fail.
+    let path = dir.join("api.log");
+    std::fs::create_dir(&path).unwrap();
+
+    let cfg = LogFileConfig {
+      path: path.clone(),
+      max_bytes: 1024,
+    };
+    assert!(open_log_file(&cfg, "api", 42, SystemTime::now()).is_none());
+
+    std::fs::remove_dir_all(&dir).unwrap();
   }
 }
